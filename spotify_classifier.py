@@ -4,16 +4,19 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import squarify
+import shap
 from scipy.stats import zscore
 from scipy.stats.mstats import winsorize
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.metrics import accuracy_score,classification_report, precision_score, recall_score, confusion_matrix, precision_recall_curve
+from sklearn.preprocessing import LabelEncoder, RobustScaler
+from sklearn.metrics import accuracy_score,classification_report, precision_score, recall_score, confusion_matrix, precision_recall_curve, f1_score, auc, roc_curve, roc_auc_score
+from sklearn.feature_selection import RFE
+from imblearn.over_sampling import SMOTE
+from collections import Counter
 from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
-from sklearn.decomposition import PCA
-from mpl_toolkits.mplot3d import Axes3D
+import lightgbm as lgb
 
 
 # Ignore warnings
@@ -36,6 +39,8 @@ df.info()
 
 # Drop unnecessary columns
 df.drop(columns=['index', 'track_id', 'artists', 'album_name', 'track_name'], inplace=True)
+
+df.info()
 
 #check if all columns in the dataset have consistent data types
 df.dtypes.value_counts()
@@ -71,6 +76,91 @@ df = df.drop(columns=['duration_ms'])
 df.info()
 print(f"Final dataset size: {df.shape}")
 print(df.head())
+
+
+#Data visualization
+# Explicit - Bar Plot
+plt.figure(figsize=(10, 5))
+sns.countplot(x=df["explicit"], palette="coolwarm")
+plt.title("Explicit Songs Count")
+plt.xlabel("Explicit")
+plt.ylabel("Count")
+plt.show()
+
+# Explicit - Pie Chart
+plt.figure(figsize=(6, 6))
+df["explicit"].value_counts().plot.pie(autopct="%1.1f%%", colors=["skyblue", "salmon"])
+plt.title("Explicit Songs Proportion")
+plt.ylabel("")
+plt.show()
+
+# Mode - Bar Plot
+plt.figure(figsize=(6, 5))
+sns.countplot(x=df["mode"], palette="coolwarm")
+plt.title("Mode Distribution")
+plt.xlabel("Mode")
+plt.ylabel("Count")
+plt.show()
+
+
+
+# Mode - Pie Chart
+plt.figure(figsize=(6, 6))
+df["mode"].value_counts().plot.pie(autopct="%1.1f%%", colors=["skyblue", "salmon"])
+plt.title("Mode Proportion")
+plt.ylabel("")
+plt.show()
+
+
+
+
+# Key - Bar Plot
+plt.figure(figsize=(10, 5))
+sns.countplot(x=df["key"], palette="viridis")
+plt.title("Key Distribution")
+plt.xlabel("Musical Key")
+plt.ylabel("Count")
+plt.show()
+
+# Time Signature - Bar Plot
+plt.figure(figsize=(8, 5))
+sns.countplot(x=df["time_signature"], palette="magma")
+plt.title("Time Signature Distribution")
+plt.xlabel("Time Signature")
+plt.ylabel("Count")
+plt.show()
+
+# Track Genre - Bar Plot (Top 50 Genres)
+top_genres = df["track_genre"].value_counts().nlargest(50)
+plt.figure(figsize=(12, 6))
+sns.barplot(x=top_genres.values, y=top_genres.index, palette="plasma")
+plt.title("Top 50 Most Common Track Genres")
+plt.xlabel("Count")
+plt.ylabel("Genre")
+plt.show()
+
+
+# Numerical feature distributions (Histograms & Box Plots)
+numerical_features = [
+    "popularity", "duration_min", "danceability", "energy",
+    "loudness", "speechiness", "acousticness", "instrumentalness",
+    "liveness", "valence", "tempo"
+]
+
+for feature in numerical_features:
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+    # Histogram
+    sns.histplot(df[feature], bins=50, kde=True, ax=axes[0], color="blue")
+    axes[0].set_title(f"{feature} Distribution")
+    # Box plot
+    sns.boxplot(x=df[feature], ax=axes[1], color="red")
+    axes[1].set_title(f"{feature} Box Plot")
+    # Show the plots
+    plt.tight_layout()
+    plt.show()
+
+
+
 
 #Create the Mood Column
 def classify_mood(row):
@@ -126,9 +216,11 @@ sns.heatmap(corr_matrix, annot=False, cmap='coolwarm', linewidths=0.5)
 plt.title("Feature Correlation Matrix")
 plt.show()
 
+#handling outliers
+df_numeric = df.select_dtypes(include=['float64', 'int64'])
+
 #outlier detection using boxplots
 plt.figure(figsize=(12, 6))
-df_numeric = df.select_dtypes(include=['float64', 'int64'])
 df_numeric.boxplot(rot=45, patch_artist=True, boxprops=dict(facecolor="lightblue"))
 plt.title("Boxplot of Numeric Features")
 plt.show()
@@ -178,206 +270,164 @@ plt.show()
 X = df_final.drop(columns=['mood_encoded'])  # Features
 y = df_final['mood_encoded'].astype(int)  # Ensure target remains categorical (integer)
 
-# Feature Scaling (Apply StandardScaler only to X)
-scaler = StandardScaler()
+
+# Apply RobustScaler 
+scaler = RobustScaler()
 X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
 
-# Recalculate Z-scores after scaling
-z_scores_scaled = np.abs(zscore(X_scaled))  # Compute Z-scores for scaled features
-outliers_scaled = (z_scores_scaled > 5).sum()  # Count outliers
-print(f"Number of outliers per feature after scaling:\n{outliers_scaled}")
+# Check if outliers persist after scaling
+z_scores_scaled = np.abs(zscore(X_scaled))  
+outliers_scaled = (z_scores_scaled > 5).sum()  
+print(f"Number of outliers per feature after Robust Scaling:\n{outliers_scaled}")
+
+#Feature Selection with Recursive Feature Elimination (RFE)
+xgb = XGBClassifier(n_estimators=100, use_label_encoder=False, eval_metric='mlogloss')
+rfe = RFE(estimator=xgb, n_features_to_select=5)  # Select top 5 features
+rfe.fit(X_scaled, y)
+
+# Get selected features
+selected_features = X_scaled.columns[rfe.support_]
+print("Selected Features:", selected_features)
 
 
-#Train the model
+# Compute correlation matrix
+corr_matrix = X_scaled.corr()
+
+# Heatmap to visualize correlations
+plt.figure(figsize=(12, 8))
+sns.heatmap(corr_matrix, annot=True, cmap="coolwarm", fmt=".2f", linewidths=0.5)
+plt.title("Feature Correlation Heatmap")
+plt.show()
+
+# Remove features with high correlation (threshold = 0.85)
+high_corr_features = set()
+for i in range(len(corr_matrix.columns)):
+    for j in range(i):
+        if abs(corr_matrix.iloc[i, j]) > 0.85:
+            colname = corr_matrix.columns[i]
+            high_corr_features.add(colname)
+
+# Drop redundant features
+X_selected = X_scaled.drop(columns=high_corr_features)
+print("Features kept after correlation analysis:", X_selected.columns.tolist())
+
+
+
+# Apply SMOTE to handle class imbalance
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X_selected, y)
+
+# Check class distribution after SMOTE
+print("Class distribution after SMOTE:", Counter(y_resampled))
+
+
+
+# Split data into train and test sets
 X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y,  # Use X_scaled instead of X
+    X_resampled, y_resampled, 
     test_size=0.2, 
     random_state=42, 
-    stratify=y  # Ensures balanced class distribution
+    stratify=y_resampled  # Ensures balanced class distribution
 )
 
-# Train RandomForest
-rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
-rf_model.fit(X_train, y_train)
-
-# Get Feature Importance
-feature_importances = pd.DataFrame({"Feature": X_train.columns, "Importance": rf_model.feature_importances_})
-feature_importances = feature_importances.sort_values(by="Importance", ascending=False)
-
-# Plot Feature Importance
-plt.figure(figsize=(10, 6))
-sns.barplot(x="Importance", y="Feature", data=feature_importances, palette="viridis")
-plt.title("Feature Importance - RandomForest")
-plt.xlabel("Importance")
-plt.ylabel("Feature")
-plt.show()
 
 
-# Selecting only the top features based on RandomForest importance
-top_features = ['valence', 'energy', 'danceability', 'acousticness', 'loudness', 'mood_encoded']
-df_selected = df_final[top_features]
-
-# Feature Scaling
-scaler = StandardScaler()
-df_scaled = pd.DataFrame(scaler.fit_transform(df_selected.drop(columns=['mood_encoded'])), 
-                         columns=['valence', 'energy', 'danceability', 'acousticness', 'loudness'])
-
-# Target variable (Ensure it's categorical)
-X = df_scaled
-y = df_selected['mood_encoded'].astype(int)  # Converting to integer categories
-
-# Splitting data into train and test sets
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-# Hyperparameter tuning for XGBoost
-xgb_model = XGBClassifier(
-    use_label_encoder=False, 
-    eval_metric='mlogloss', 
-    random_state=42,
-    n_estimators=10,  # less trees with lower learning rate
-    learning_rate=0.03,  # Lower learning rate
-    max_depth=2,  # Control tree complexity
-    lambda_=100,  # L2 regularization
-    alpha=3  # L1 regularization
-)
-
-# Hyperparameter tuning for LGBM
-lgbm_mo0del = LGBMClassifier(
-    random_state=42,
-    n_estimators=10,
-    learning_rate=0.04,
-    max_depth=5,
-    num_leaves=10,  # Avoid too many leaves
-    reg_alpha=5,  # L1 regularization
-    reg_lambda=5,  # L2 regularization
-    feature_fraction=0.8,  # Use only 80% of features per iteration
-    bagging_fraction=0.8,  # Use only 80% of samples per iteration
-    bagging_freq=5  # Perform bagging every 5 iterations
-)
-
-# Train and evaluate XGBoost
-start_time = time.time()
-xgb_model.fit(X_train, y_train)
-xgb_time = time.time() - start_time
-
-y_pred_xgb = xgb_model.predict(X_test)
-xgb_accuracy = accuracy_score(y_test, y_pred_xgb)
-
-# Train and evaluate LGBM
-start_time = time.time()
-lgbm_model.fit(X_train, y_train)
-lgbm_time = time.time() - start_time
-
-y_pred_lgbm = lgbm_model.predict(X_test)
-lgbm_accuracy = accuracy_score(y_test, y_pred_lgbm)
-
-# Print results
-results = {
-    "Model": ["XGBoost", "LGBM"],
-    "Accuracy": [xgb_accuracy, lgbm_accuracy],
-    "Training Time (s)": [xgb_time, lgbm_time]
+# Define models
+models = {
+    "XGBoost": XGBClassifier(n_estimators=100, use_label_encoder=False, eval_metric='mlogloss', random_state=42),
+    "LightGBM": lgb.LGBMClassifier(n_estimators=100, random_state=42)
 }
 
-results_df = pd.DataFrame(results)
-print(results_df)
 
-# Generate classification reports
-xgb_report = classification_report(y_test, y_pred_xgb)
-lgbm_report = classification_report(y_test, y_pred_lgbm)
 
-# Print classification reports
-print("\nClassification Report - XGBoost:\n", xgb_report)
-print("\nClassification Report - LGBM:\n", lgbm_report)
+# Train & Evaluate each model
+for name, model in models.items():
+    start_time = time.time()  # Start time
+    model.fit(X_train, y_train)
+    end_time = time.time()  # End time
+    y_pred = model.predict(X_test)
+    precision = precision_score(y_test, y_pred, average='weighted')
+    recall = recall_score(y_test, y_pred, average='weighted')
+    f1 = f1_score(y_test, y_pred, average='weighted')
+    print(f"\n{name} Model Performance:")
+    print(f"Training Time: {end_time - start_time:.2f} seconds")
+    print(f"Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1 Score: {f1:.4f}")
+    print("Classification Report:\n", classification_report(y_test, y_pred))
+    print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
 
-# Print confusion matrices
-print("\nConfusion Matrix - XGBoost:\n", xgb_conf_matrix)
-print("\nConfusion Matrix - LGBM:\n", lgbm_conf_matrix)
 
-# Compute confusion matrices
-xgb_conf_matrix = confusion_matrix(y_test, y_pred_xgb)
-lgbm_conf_matrix = confusion_matrix(y_test, y_pred_lgbm)
+#Confusion Matrix Heatmap
+plt.figure(figsize=(15, 5))
 
-# Function to plot confusion matrices
-def plot_conf_matrix(conf_matrix, model_name):
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(conf_matrix, annot=True, fmt="d", cmap="Blues", cbar=False)
+# Loop through models and plot Confusion Matrices
+for i, (name, model) in enumerate(models.items()):
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    
+    # Compute confusion matrix
+    cm = confusion_matrix(y_test, y_pred)
+    
+    # Plot confusion matrix as a heatmap
+    plt.subplot(1, 3, i+1)  # 1 row, 3 columns (for 3 models)
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=le_mood.classes_, yticklabels=le_mood.classes_)
     plt.xlabel("Predicted Label")
     plt.ylabel("True Label")
-    plt.title(f"Confusion Matrix - {model_name}")
-    plt.show()
+    plt.title(f"Confusion Matrix - {name}")
 
-# Plot for XGBoost
-plot_conf_matrix(xgb_conf_matrix, "XGBoost")
-
-# Plot for LightGBM
-plot_conf_matrix(lgbm_conf_matrix, "LightGBM")
-
-
-
-#2D Scatter Plot using PCA
-# Apply PCA to reduce features to 2D
-pca = PCA(n_components=2)
-X_test_pca = pca.fit_transform(X_test)
-
-# Create scatter plot
-plt.figure(figsize=(8, 6))
-sns.scatterplot(x=X_test_pca[:, 0], y=X_test_pca[:, 1], hue=y_test, palette="viridis", alpha=0.7)
-plt.xlabel("Principal Component 1")
-plt.ylabel("Principal Component 2")
-plt.title("2D Scatter Plot of Classes (PCA)")
-plt.legend(title="Class")
-plt.show()
-
-
-#3D Scatter Plot using PCA
-# Apply PCA to reduce features to 3D
-pca_3d = PCA(n_components=3)
-X_test_pca_3d = pca_3d.fit_transform(X_test)
-
-# Create a 3D scatter plot
-fig = plt.figure(figsize=(10, 7))
-ax = fig.add_subplot(111, projection="3d")
-sc = ax.scatter(X_test_pca_3d[:, 0], X_test_pca_3d[:, 1], X_test_pca_3d[:, 2], c=y_test, cmap="viridis", alpha=0.7)
-ax.set_xlabel("Principal Component 1")
-ax.set_ylabel("Principal Component 2")
-ax.set_zlabel("Principal Component 3")
-plt.title("3D Scatter Plot of Classes (PCA)")
-plt.colorbar(sc, label="Class")
+plt.tight_layout()
 plt.show()
 
 
 
+# Define a color map for the models
+colors = {
+    "XGBoost": "green",
+    "LightGBM": "red"
+}
+
+#Compute misclassification rates per mood
+# Initialize a dictionary to store misclassification results
+misclassification_results = {}
+
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    # Compute confusion matrix
+    cm = confusion_matrix(y_test, y_pred)
+    # Calculate misclassification rate for each mood
+    total_samples_per_class = cm.sum(axis=1)  # Total true samples per class
+    misclassified_per_class = total_samples_per_class - np.diag(cm)  # Off-diagonal elements
+    misclassification_rate = misclassified_per_class / total_samples_per_class
+    misclassification_results[name] = misclassification_rate
+    # Print misclassification results
+    print(f"\nMisclassification Rate for {name}:")
+    for i, mood in enumerate(le_mood.classes_):
+        print(f"{mood}: {misclassification_rate[i]:.2%}")
 
 
+#visualize misclassification rates per model
+plt.figure(figsize=(12, 6))
+
+for name, misclassification_rate in misclassification_results.items():
+    plt.plot(le_mood.classes_, misclassification_rate, marker='o', label=name)
+
+plt.xlabel("Mood")
+plt.ylabel("Misclassification Rate")
+plt.title("Misclassification Rate by Mood for Each Model")
+plt.xticks(rotation=45)
+plt.legend()
+plt.grid()
+plt.show()
 
 
+# Initialize SHAP explainer for XGBoost
+xgb_explainer = shap.TreeExplainer(models["XGBoost"])
+shap_values = xgb_explainer(X_test)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# Summary Plot - Feature Importance
+shap.summary_plot(shap_values, X_test)
 
