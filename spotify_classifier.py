@@ -8,7 +8,7 @@ import squarify
 import shap
 from scipy.stats import zscore
 from scipy.stats.mstats import winsorize
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder, RobustScaler
 from sklearn.metrics import accuracy_score,classification_report, precision_score, recall_score, confusion_matrix, precision_recall_curve, f1_score, auc, roc_curve, roc_auc_score
